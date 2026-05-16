@@ -19,7 +19,10 @@
 #   - DocDB endpoint changes
 #   - manual replay variable changes
 
-data "aws_docdb_cluster" "tgt_docdb" {
+# DocumentDB clusters surface via the generic aws_rds_cluster data source
+# (DocDB is RDS-managed under the hood). No dedicated aws_docdb_cluster
+# data source exists.
+data "aws_rds_cluster" "tgt_docdb" {
   cluster_identifier = var.docdb_cluster_identifier
 }
 
@@ -43,7 +46,7 @@ variable "replay_docdb" {
 resource "null_resource" "restore_docdb" {
   triggers = {
     dump_sha256    = local.docdb_dump_sha256
-    docdb_endpoint = data.aws_docdb_cluster.tgt_docdb.endpoint
+    docdb_endpoint = data.aws_rds_cluster.tgt_docdb.endpoint
     bastion_id     = local.bastion_id
     replay         = var.replay_docdb
   }
@@ -54,7 +57,7 @@ resource "null_resource" "restore_docdb" {
       set -euo pipefail
       export REGION="${var.aws_region}"
       export BASTION_ID="${local.bastion_id}"
-      export DOCDB_ENDPOINT="${data.aws_docdb_cluster.tgt_docdb.endpoint}"
+      export DOCDB_ENDPOINT="${data.aws_rds_cluster.tgt_docdb.endpoint}"
       export DOCDB_DB="${var.docdb_db_name}"
       export DOCDB_SECRET="${var.docdb_secret_name}"
       export LOCAL_PORT="${var.docdb_local_port}"
