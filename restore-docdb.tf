@@ -25,7 +25,7 @@ data "aws_docdb_cluster" "tgt_docdb" {
 
 # Hash all files in the dump directory so any content change re-triggers restore
 locals {
-  docdb_dump_dir = "${path.module}/restore/docdb-enterprise_corp"
+  docdb_dump_dir   = "${path.module}/restore/docdb-enterprise_corp"
   docdb_dump_files = fileset(local.docdb_dump_dir, "**/*")
   docdb_dump_sha256 = sha256(join("", [
     for f in sort(local.docdb_dump_files) :
