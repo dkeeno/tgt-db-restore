@@ -1,0 +1,182 @@
+# =============================================================================
+# terraform.yml — validate / plan / manual-apply pipeline for tgt-db-restore
+# =============================================================================
+#
+# Mirrors the working tgt-cluster-iac pattern (validate → plan → apply chained
+# via needs:, apply gated on production environment).
+#
+# Auth: GitHub OIDC → AWS IAM role tgt-github-actions (already provisioned by
+# sbx-tgt-iam). The role has AdministratorAccess.
+#
+# Required secrets:
+#   AWS_ROLE_ARN — arn:aws:iam::784916389752:role/tgt-github-actions
+# Required variables:
+#   AWS_REGION   — us-east-1
+
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - '**.tf'
+      - '**.tfvars'
+      - 'restore/**'
+      - '.github/workflows/terraform.yml'
+  push:
+    branches: [main]
+    paths:
+      - '**.tf'
+      - '**.tfvars'
+      - 'restore/**'
+      - '.github/workflows/terraform.yml'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Apply or Destroy
+        type: choice
+        required: true
+        default: apply
+        options: [apply, destroy]
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  TF_VERSION: '1.10.3'
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Format check
+        run: terraform fmt -check -recursive
+      - name: Init (no backend — validate-only)
+        run: terraform init -backend=false
+      - name: Validate
+        run: terraform validate
+
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch'
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-tf-plan-${{ github.run_id }}
+      - name: Init
+        run: terraform init
+      - name: Plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -no-color -out=tfplan 2>&1 | tee plan-output.txt
+          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+      - name: Upload plan artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.run_id }}
+          path: |
+            tfplan
+            plan-output.txt
+          retention-days: 14
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('plan-output.txt', 'utf8');
+            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n\n... (truncated)';
+            const body = `### terraform plan\n\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n\n</details>`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+      - name: Fail if plan errored
+        if: steps.plan.outputs.exit != '0' && steps.plan.outputs.exit != '2'
+        run: exit 1
+
+  apply:
+    name: apply
+    runs-on: ubuntu-latest
+    needs: plan
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      # Tools the local-exec scripts need on the runner
+      - name: Install jq + bash-utils (probably already present)
+        run: sudo apt-get install -y jq curl ca-certificates
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-tf-apply-${{ github.run_id }}
+      - name: Init
+        run: terraform init
+      - name: Download plan artifact
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.run_id }}
+      - name: Apply (push to main → use plan artifact)
+        if: github.event_name == 'push'
+        run: terraform apply -auto-approve tfplan
+      - name: Apply (workflow_dispatch → fresh plan + apply)
+        if: github.event_name == 'workflow_dispatch'
+        run: terraform apply -auto-approve
+      - name: Capture outputs
+        run: terraform output -json > terraform-outputs.json
+      - name: Upload outputs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs-${{ github.run_id }}
+          path: terraform-outputs.json
+          retention-days: 90
+
+  destroy:
+    name: destroy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-tf-destroy-${{ github.run_id }}
+      - name: Init
+        run: terraform init
+      - name: Destroy
+        run: terraform destroy -auto-approve
