@@ -1,0 +1,6 @@
+.terraform/
+.terraform.lock.hcl
+*.tfplan
+plan-output.txt
+terraform-outputs.json
+.DS_Store
