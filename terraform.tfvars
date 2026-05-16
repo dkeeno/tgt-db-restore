@@ -12,3 +12,9 @@ docdb_db_name            = "enterprise_corp"
 docdb_secret_name        = "tgt-docdb-master-credentials"
 pg_local_port            = 15432
 docdb_local_port         = 27018
+
+# Bump these to force the null_resource to re-run even when dump hash is unchanged.
+# Used to recover from the 2026-05-16 apply where pg_restore exit-1 (benign)
+# was incorrectly treated as fatal by the shell script.
+replay_pg    = "2026-05-16-retry-after-exitcode-fix"
+replay_docdb = "2026-05-16-retry-after-exitcode-fix"

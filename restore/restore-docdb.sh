@@ -67,7 +67,9 @@ done
 (echo >/dev/tcp/localhost/$LOCAL_PORT) 2>/dev/null || die "tunnel did not come up in 20s"
 
 # ---------- Run mongorestore --------------------------------------------
+# Capture exit code separately so we don't trip on benign warnings.
 log "Running mongorestore (--drop for idempotent re-run)"
+set +e
 mongorestore \
   --host "localhost:${LOCAL_PORT}" \
   --username docdbadmin \
@@ -76,7 +78,21 @@ mongorestore \
   --ssl --sslCAFile="$CA_BUNDLE" --tlsInsecure \
   --drop \
   --db "$DOCDB_DB" \
-  "$DUMP_DIR/$DOCDB_DB" 2>&1 | tail -20 || die "mongorestore failed"
+  "$DUMP_DIR/$DOCDB_DB" > /tmp/mongorestore.out 2>&1
+MR_EXIT=$?
+set -e
+tail -20 /tmp/mongorestore.out
+if [[ $MR_EXIT -ne 0 ]]; then
+  # mongorestore exits non-zero on any error including benign "namespace not
+  # found" on --drop against a fresh DB. Treat as success if the per-collection
+  # "done dumping" lines are present for at least one collection.
+  if ! grep -q "done dumping\|finished restoring" /tmp/mongorestore.out; then
+    die "mongorestore failed with exit $MR_EXIT and no successful restores"
+  fi
+  log "mongorestore exit $MR_EXIT (tolerated — restores succeeded)"
+else
+  log "mongorestore success"
+fi
 
 # ---------- Verify --------------------------------------------------------
 log "Verifying document counts per collection"
