@@ -75,11 +75,27 @@ done
 (echo >/dev/tcp/localhost/$LOCAL_PORT) 2>/dev/null || die "tunnel did not come up in 20s"
 
 # ---------- Run pg_restore ----------------------------------------------
+# pg_restore exit codes:
+#   0  success
+#   1  errors occurred — including ignored errors from --if-exists DROPs
+#      against an empty DB (expected on first restore). Anything > 1 is fatal.
+# We capture the exit code separately (set +e), tail the log, then decide.
 log "Running pg_restore (--clean --if-exists for idempotency)"
+set +e
 PGSSLMODE=require pg_restore \
   -h localhost -p "$LOCAL_PORT" -U dbadmin -d "$RDS_DB" \
   --clean --if-exists --no-owner --no-acl --verbose \
-  "$DUMP_PATH" 2>&1 | tail -40 || die "pg_restore failed"
+  "$DUMP_PATH" > /tmp/pg_restore.out 2>&1
+PG_EXIT=$?
+set -e
+tail -40 /tmp/pg_restore.out
+if [[ $PG_EXIT -gt 1 ]]; then
+  die "pg_restore failed with exit $PG_EXIT (fatal)"
+fi
+if [[ $PG_EXIT -eq 1 ]] && ! grep -q "errors ignored on restore" /tmp/pg_restore.out; then
+  die "pg_restore returned 1 with no 'errors ignored' line — treat as fatal"
+fi
+log "pg_restore exit $PG_EXIT (tolerated)"
 
 # ---------- Verify --------------------------------------------------------
 log "Verifying row counts in known tables"
