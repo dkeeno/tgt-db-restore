@@ -95,9 +95,24 @@ else
 fi
 
 # ---------- Verify --------------------------------------------------------
-log "Verifying document counts per collection"
-mongosh --quiet \
-  "mongodb://docdbadmin:$(jq -rn --arg pw "$DOCDB_PASS" '$pw | @uri')@localhost:${LOCAL_PORT}/${DOCDB_DB}?tls=true&tlsCAFile=${CA_BUNDLE}&tlsAllowInvalidHostnames=true&authSource=admin&directConnection=true" \
-  --eval 'db.getCollectionNames().forEach(c => print(c + "=" + db[c].countDocuments({})))' 2>&1 | tail -10
+# mongorestore reports per-collection success counts directly. Parse those
+# instead of requiring mongosh (separate package not bundled with
+# mongodb-database-tools).
+log "Per-collection restore summary (from mongorestore output)"
+grep -E "[0-9]+ document\(s\) restored successfully" /tmp/mongorestore.out \
+  | sed -E 's/.*Z[[:space:]]+//' | tail -20 || true
+
+TOTAL_RESTORED=$(grep -oE "[0-9]+ document\(s\) restored successfully" /tmp/mongorestore.out \
+  | head -1 | grep -oE "^[0-9]+" || echo "0")
+log "Total documents restored: ${TOTAL_RESTORED}"
+if [[ "$TOTAL_RESTORED" -eq 0 ]]; then
+  die "mongorestore reported 0 documents restored"
+fi
+
+# Known non-fatal DocDB limitation: text + simple scalar combined index.
+# Source MongoDB index can't be replicated; the data still restores OK.
+if grep -q "text index combining" /tmp/mongorestore.out; then
+  log "WARN: skipped one unsupported text-index combination (DocDB limitation, data restored)"
+fi
 
 log "DocDB restore complete"
